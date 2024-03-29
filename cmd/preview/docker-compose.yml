@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  redis:
+    # name: redis-stack
+    image: redis/redis-stack:latest
+    ports:
+      - 6379:6379
+      - 8001:8001
+  preview:
+    container_name: preview
+    depends_on:
+      - redis
+    build:
+      context: .
+    volumes:
+      - /home/srliao/code/assets/assets:/assets
+    environment:
+      - ASSETS_DATA_PATH=/assets
+    ports:
+      - 3001:3001
+    restart: unless-stopped

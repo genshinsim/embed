@@ -4,6 +4,7 @@ import (
 	"embed"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/genshinsim/preview"
 	"github.com/redis/go-redis/v9"
@@ -14,16 +15,17 @@ var content embed.FS
 
 func main() {
 	server, err := preview.New(content, redis.Options{
-		Addr:     "localhost:6379",
+		Addr:     "redis:6379",
 		Password: "",
 		DB:       0,
 	},
 		preview.WithProxy("/api", "https://gcsim.app/"),
-		preview.WithLocalAssets("/api/assets", "/home/srliao/code/assets/assets"),
+		preview.WithLocalAssets("/api/assets", os.Getenv("ASSETS_DATA_PATH")),
+		preview.WithSkipTLSVerify(),
 	)
 	if err != nil {
 		panic(err)
 	}
 	log.Println("starting img generation listener")
-	log.Fatal(http.ListenAndServe("localhost:3001", server.Router))
+	log.Fatal(http.ListenAndServe(":3001", server.Router))
 }

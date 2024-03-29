@@ -1,12 +1,20 @@
 package preview
 
 import (
+	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"mime"
 	"net/http"
 	"path"
 	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/middleware"
+	"github.com/redis/go-redis/v9"
 )
 
 func (s *Server) handleProxy(prefix string) http.HandlerFunc {
@@ -52,4 +60,95 @@ func (s *Server) notFoundHandler() http.HandlerFunc {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}
+}
+
+func (s *Server) handleImageRequest(src string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		s.logger.Info("generate request", "src", src, "id", id)
+		if id == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		//change id to include src
+		id = src + "/" + id
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second) //TODO: change length
+		defer cancel()
+
+		pubsub := s.rdb.Subscribe(ctx, id)
+		defer pubsub.Close()
+
+		res := s.rdb.Get(ctx, id)
+		switch res.Err() {
+		case nil:
+			if val := res.Val(); !strings.HasPrefix(val, "wip") {
+				s.handleResult(val, w)
+				return
+			}
+			//wait for existing result
+		case redis.Nil:
+			s.rdb.Set(ctx, id, "wip", 60*time.Second)
+			go s.do(id)
+		default:
+			//exception case where something goes wrong with redis
+			s.logger.Info("unexpected get with non nil err", "id", id, "err", res.Err())
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		//wip, sub to topic == id and wait for ok or time out
+		ch := pubsub.Channel()
+		select {
+		case <-ctx.Done():
+			s.logger.Info("context done before receiving msg", "reason", ctx.Err())
+			w.WriteHeader(http.StatusRequestTimeout)
+			return
+		case msg := <-ch:
+			requestID := ctx.Value(middleware.RequestIDKey)
+			s.logger.Info("received msg from redis", "request_id", requestID, "msg", msg.Payload)
+			if msg.Payload != "done" {
+				//this is an error message so just skip getting
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(msg.Payload))
+				return
+			}
+			//key must be available now?
+			res := s.rdb.Get(ctx, id)
+			if err := res.Err(); err != nil {
+				s.logger.Info("redis get unexpected err", "request_id", requestID, "err", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			//res can't be wip still
+			val := res.Val()
+			if strings.HasPrefix(val, "wip") {
+				s.logger.Info("unexpected res is still wip", "request_id", requestID)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			s.handleResult(val, w)
+			return
+		}
+	}
+}
+
+func (s *Server) handleResult(val string, w http.ResponseWriter) {
+	if strings.HasPrefix(val, "error") {
+		w.Write([]byte(val))
+		return
+	}
+	data, err := decode(val)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Write(data)
+}
+
+func encode(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+func decode(data string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(data)
 }

@@ -5,13 +5,11 @@ import (
 	"crypto/tls"
 	"embed"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"path"
 	"strings"
 
 	"github.com/go-chi/chi"
@@ -25,6 +23,7 @@ type Server struct {
 	logger *slog.Logger
 	Router *chi.Mux
 	rdb    *redis.Client
+	work   chan string
 
 	// static asset; mandatory to serve from
 	staticFS embed.FS
@@ -47,6 +46,7 @@ type Server struct {
 func New(fs embed.FS, connOpt redis.Options, opts ...serverCfg) (*Server, error) {
 	s := &Server{
 		staticFS: fs,
+		work:     make(chan string),
 	}
 	s.Router = chi.NewRouter()
 	for _, f := range opts {
@@ -67,6 +67,7 @@ func New(fs embed.FS, connOpt redis.Options, opts ...serverCfg) (*Server, error)
 	if err != nil {
 		return nil, fmt.Errorf("redis ping failed: %w", err)
 	}
+	go s.listen()
 
 	return s, nil
 }
@@ -110,6 +111,7 @@ func WithSkipTLSVerify() serverCfg {
 func (s *Server) routes() error {
 	s.Router.Use(middleware.Logger)
 	s.Router.Use(middleware.Recoverer)
+	s.Router.Use(middleware.RequestID)
 
 	if s.useLocalAssets {
 		localAssetsFS := http.FileServer(http.Dir(s.assetsDir))
@@ -128,15 +130,10 @@ func (s *Server) routes() error {
 		}
 	}
 
+	s.Router.Handle("/generate/db/{id}", s.handleImageRequest("db"))
+	s.Router.Handle("/generate/sh/{id}", s.handleImageRequest("sh"))
+
 	s.Router.NotFound(s.notFoundHandler())
 
 	return nil
-}
-
-type myFS struct {
-	content embed.FS
-}
-
-func (c myFS) Open(name string) (fs.File, error) {
-	return c.content.Open(path.Join("dist", name))
 }
