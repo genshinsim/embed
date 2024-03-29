@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 
 	"github.com/go-chi/chi"
+	"github.com/go-chi/chi/middleware"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -21,7 +23,7 @@ type serverCfg func(s *Server) error
 
 type Server struct {
 	logger *slog.Logger
-	router *chi.Mux
+	Router *chi.Mux
 	rdb    *redis.Client
 
 	// static asset; mandatory to serve from
@@ -46,11 +48,15 @@ func New(fs embed.FS, connOpt redis.Options, opts ...serverCfg) (*Server, error)
 	s := &Server{
 		staticFS: fs,
 	}
+	s.Router = chi.NewRouter()
 	for _, f := range opts {
 		err := f(s)
 		if err != nil {
 			return nil, err
 		}
+	}
+	if s.logger == nil {
+		s.logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
 	}
 	err := s.routes()
 	if err != nil {
@@ -102,18 +108,17 @@ func WithSkipTLSVerify() serverCfg {
 }
 
 func (s *Server) routes() error {
-	fs := http.FileServer(http.FS(&myFS{content: s.staticFS}))
-	s.router.Handle("/", fs)
+	s.Router.Use(middleware.Logger)
+	s.Router.Use(middleware.Recoverer)
 
 	if s.useLocalAssets {
 		localAssetsFS := http.FileServer(http.Dir(s.assetsDir))
-		s.router.Handle(fmt.Sprintf("%v/*", s.assetsPrefix), http.StripPrefix(s.assetsPrefix+"/", localAssetsFS))
+		s.Router.Handle(fmt.Sprintf("%v/*", s.assetsPrefix), http.StripPrefix(s.assetsPrefix+"/", localAssetsFS))
 	}
 
 	if s.useProxy {
-		path := strings.TrimPrefix(s.proxyPrefix, "/")
-		path = strings.TrimSuffix(path, "/")
-		s.router.Handle(path+"/*", s.handleProxy(path))
+		path := strings.TrimSuffix(s.proxyPrefix, "/")
+		s.Router.Handle(path+"/*", s.handleProxy(path))
 
 		s.proxy = httputil.NewSingleHostReverseProxy(s.proxyTarget)
 		if s.skipInsecure {
@@ -122,6 +127,8 @@ func (s *Server) routes() error {
 			}
 		}
 	}
+
+	s.Router.NotFound(s.notFoundHandler())
 
 	return nil
 }

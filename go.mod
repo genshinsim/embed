@@ -1,4 +1,4 @@
-module github.com/srliao/embed-test
+module github.com/genshinsim/preview
 
 go 1.22.1
 
