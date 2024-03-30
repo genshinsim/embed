@@ -87,7 +87,7 @@ func (s *Server) handleImageRequest(src string) http.HandlerFunc {
 			}
 			//wait for existing result
 		case redis.Nil:
-			s.rdb.Set(ctx, id, "wip", 60*time.Second)
+			s.rdb.Set(ctx, id, "wip", 30*time.Minute)
 			go s.do(id)
 		default:
 			//exception case where something goes wrong with redis

@@ -15,7 +15,7 @@ var content embed.FS
 
 func main() {
 	server, err := preview.New(content, redis.Options{
-		Addr:     "redis:6379",
+		Addr:     "192.168.100.206:6379",
 		Password: "",
 		DB:       0,
 	},

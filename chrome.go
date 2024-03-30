@@ -6,7 +6,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/chromedp/chromedp"
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/proto"
+	"github.com/ysmood/gson"
 )
 
 func (s *Server) do(id string) {
@@ -48,53 +50,93 @@ func (s *Server) listen() {
 		if count < 1 && len(queue) > 0 {
 			count++
 			next := queue[0]
-			go generateSnapshot(next, done)
+			go s.doWork(next, done)
 			queue = queue[1:]
 			s.logger.Info("starting work", "id", next, "remaining", queue)
 		}
 	}
 }
 
-func generateSnapshot(id string, done chan resp) {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.WindowSize(540, 250),
-	)
-	allocCtx, cancel := chromedp.NewExecAllocator(
-		context.Background(),
-		opts...,
-	)
-	defer cancel()
-	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
-	defer cancel()
-
-	var buf []byte
-
-	url := fmt.Sprintf("localhost:3001/%v", id)
-
-	// capture entire browser viewport, returning png with quality=90
-	err := chromedp.Run(ctx, fullScreenshot(url, 100, &buf))
-
+func (s *Server) doWork(id string, done chan resp) {
+	res, err := generateSnapshot("http://localhost:3001/" + id)
+	s.logger.Info("work completed", "err", err)
 	done <- resp{
 		id:   id,
-		data: buf,
+		data: res,
 		err:  err,
 	}
 }
 
-func fullScreenshot(urlstr string, quality int, res *[]byte) chromedp.Tasks {
-	return chromedp.Tasks{
-		chromedp.ActionFunc(func(context.Context) error {
-			return nil
-		}),
-		chromedp.Navigate(urlstr),
-		chromedp.ActionFunc(func(context.Context) error {
-			return nil
-		}),
-		chromedp.WaitEnabled("#status"),
-		chromedp.ActionFunc(func(context.Context) error {
-			//should handle checking if there's an error msgs here
-			return nil
-		}),
-		chromedp.FullScreenshot(res, quality),
+func generateSnapshot(url string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	browser := rod.New()
+	browser.Context(ctx)
+	err := browser.Connect()
+	if err != nil {
+		return nil, fmt.Errorf("error connecting to browser: %w", err)
 	}
+	log.Println("browser connect ok")
+	page, err := browser.Page(proto.TargetCreateTarget{})
+	if err != nil {
+		return nil, fmt.Errorf("error creating page: %w", err)
+	}
+	log.Println("page load ok")
+	page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
+		Width:  520,
+		Height: 250,
+	})
+	err = page.Navigate(url)
+	if err != nil {
+		return nil, fmt.Errorf("error navigating to page: %w", err)
+	}
+	log.Println("navigated to page")
+
+	page.Race().ElementFunc(func(p *rod.Page) (*rod.Element, error) {
+		log.Println("js eval started")
+		res, err := page.Evaluate(rod.Eval(`(s, n) => document.querySelectorAll(s).length > n`, "div", 10))
+		if err != nil {
+			log.Println("eval failed? ", err)
+			return nil, &rod.ElementNotFoundError{}
+		}
+		log.Println("js eval done", res)
+		if res.Value.Bool() {
+			log.Println("loaded ok")
+			return nil, nil
+		}
+
+		return nil, &rod.ElementNotFoundError{}
+	}).Element("#has-error").Handle(func(e *rod.Element) error {
+		log.Println("error found")
+		return nil
+	}).Do()
+
+	log.Println("race done")
+
+	buf, err := page.Screenshot(true, &proto.PageCaptureScreenshot{
+		Format:  proto.PageCaptureScreenshotFormatWebp,
+		Quality: gson.Int(100),
+	})
+	return buf, err
 }
+
+// func fullScreenshot(urlstr string, quality int, res *[]byte) chromedp.Tasks {
+// 	return chromedp.Tasks{
+// 		chromedp.ActionFunc(func(context.Context) error {
+// 			log.Println("hello?")
+// 			return nil
+// 		}),
+// 		chromedp.Navigate(urlstr),
+// 		chromedp.ActionFunc(func(context.Context) error {
+// 			log.Println("navigated to ", urlstr)
+// 			return nil
+// 		}),
+// 		chromedp.WaitEnabled("#status"),
+// 		chromedp.ActionFunc(func(context.Context) error {
+// 			//should handle checking if there's an error msgs here
+// 			log.Println("status ok?")
+// 			return nil
+// 		}),
+// 		chromedp.FullScreenshot(res, quality),
+// 	}
+// }
