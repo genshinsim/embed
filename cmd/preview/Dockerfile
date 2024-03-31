@@ -1,4 +1,4 @@
-FROM chromedp/headless-shell:latest 
+FROM alpine:3.16.3
 WORKDIR /
 COPY preview /preview
 RUN ls -la

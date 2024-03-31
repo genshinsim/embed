@@ -10,7 +10,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
@@ -62,6 +61,18 @@ func (s *Server) notFoundHandler() http.HandlerFunc {
 	}
 }
 
+func (s *Server) authKeyCheck(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authKey := r.Header.Get("X-CUSTOM-AUTH-KEY")
+		if authKey != s.authKey {
+			s.logger.Info("unauthorized request", "authkey", authKey)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) handleImageRequest(src string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
@@ -72,22 +83,25 @@ func (s *Server) handleImageRequest(src string) http.HandlerFunc {
 		}
 		//change id to include src
 		id = src + "/" + id
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second) //TODO: change length
+		ctx, cancel := context.WithTimeout(r.Context(), s.generateTimeout)
 		defer cancel()
 
 		pubsub := s.rdb.Subscribe(ctx, id)
 		defer pubsub.Close()
 
 		res := s.rdb.Get(ctx, id)
+		s.logger.Info("got get from redis", "res", res)
 		switch res.Err() {
 		case nil:
 			if val := res.Val(); !strings.HasPrefix(val, "wip") {
+				s.logger.Info("id already in wip")
 				s.handleResult(val, w)
 				return
 			}
 			//wait for existing result
 		case redis.Nil:
-			s.rdb.Set(ctx, id, "wip", 30*time.Minute)
+			s.logger.Info("id no result; starting new")
+			s.rdb.Set(ctx, id, "wip", s.generateTimeout)
 			go s.do(id)
 		default:
 			//exception case where something goes wrong with redis
@@ -133,7 +147,9 @@ func (s *Server) handleImageRequest(src string) http.HandlerFunc {
 }
 
 func (s *Server) handleResult(val string, w http.ResponseWriter) {
-	if strings.HasPrefix(val, "error") {
+	if strings.HasPrefix(val, "error: ") {
+		val = strings.TrimPrefix(val, "error: ")
+		w.WriteHeader(http.StatusUnprocessableEntity)
 		w.Write([]byte(val))
 		return
 	}

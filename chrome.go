@@ -34,17 +34,15 @@ func (s *Server) listen() {
 			s.logger.Info("got work", "id", w)
 		case res := <-done:
 			count--
-			var data string
-			msg := "done"
 			if res.err != nil {
-				data = fmt.Sprintf("error: %v", res.err)
-				msg = data
+				status := s.rdb.Set(context.Background(), res.id, res.err.Error(), 5*time.Second)
+				pubstatus := s.rdb.Publish(context.Background(), res.id, res.err.Error())
+				s.logger.Info("work failed", "id", res.id, "err", res.err, "set_err", status.Err(), "publish_err", pubstatus.Err())
 			} else {
-				data = encode(res.data)
+				status := s.rdb.Set(context.Background(), res.id, encode(res.data), s.cacheTTL)
+				pubstatus := s.rdb.Publish(context.Background(), res.id, "done")
+				s.logger.Info("work done", "id", res.id, "err", res.err, "set_err", status.Err(), "publish_err", pubstatus.Err())
 			}
-			status := s.rdb.Set(context.Background(), res.id, data, 30*time.Minute)
-			pubstatus := s.rdb.Publish(context.Background(), res.id, msg)
-			s.logger.Info("work done", "id", res.id, "err", res.err, "set_err", status.Err(), "publish_err", pubstatus.Err())
 		}
 		//TODO: more than 1 worker?
 		if count < 1 && len(queue) > 0 {
@@ -58,7 +56,7 @@ func (s *Server) listen() {
 }
 
 func (s *Server) doWork(id string, done chan resp) {
-	res, err := generateSnapshot("http://localhost:3001/" + id)
+	res, err := s.generateSnapshot(s.previewURL + "/" + id)
 	s.logger.Info("work completed", "err", err)
 	done <- resp{
 		id:   id,
@@ -67,11 +65,8 @@ func (s *Server) doWork(id string, done chan resp) {
 	}
 }
 
-func generateSnapshot(url string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	browser := rod.New()
-	browser.Context(ctx)
+func (s *Server) generateSnapshot(url string) ([]byte, error) {
+	browser := rod.New().Client(s.l.MustClient())
 	err := browser.Connect()
 	if err != nil {
 		return nil, fmt.Errorf("error connecting to browser: %w", err)
@@ -80,6 +75,10 @@ func generateSnapshot(url string) ([]byte, error) {
 	page, err := browser.Page(proto.TargetCreateTarget{})
 	if err != nil {
 		return nil, fmt.Errorf("error creating page: %w", err)
+	}
+	_, err = page.SetExtraHeaders([]string{"X-CUSTOM-AUTH-KEY", s.authKey})
+	if err != nil {
+		return nil, fmt.Errorf("error setting extra headers: %w", err)
 	}
 	log.Println("page load ok")
 	page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
@@ -92,24 +91,29 @@ func generateSnapshot(url string) ([]byte, error) {
 	}
 	log.Println("navigated to page")
 
-	page.Race().ElementFunc(func(p *rod.Page) (*rod.Element, error) {
-		log.Println("js eval started")
+	_, err = page.Race().ElementFunc(func(p *rod.Page) (*rod.Element, error) {
 		res, err := page.Evaluate(rod.Eval(`(s, n) => document.querySelectorAll(s).length > n`, "div", 10))
 		if err != nil {
-			log.Println("eval failed? ", err)
 			return nil, &rod.ElementNotFoundError{}
 		}
-		log.Println("js eval done", res)
 		if res.Value.Bool() {
-			log.Println("loaded ok")
-			return nil, nil
+			return &rod.Element{}, nil
 		}
 
 		return nil, &rod.ElementNotFoundError{}
 	}).Element("#has-error").Handle(func(e *rod.Element) error {
-		log.Println("error found")
-		return nil
+		str, err := e.Attribute("value")
+		// can't do much aobut this err here other than log it
+		if err != nil {
+			s.logger.Info("error encountered looking for value attribute", "err", err)
+			return fmt.Errorf("unexpected server error: %v", err)
+		}
+		return fmt.Errorf("generate preview failed: %v", *str)
 	}).Do()
+
+	if err != nil {
+		return nil, err
+	}
 
 	log.Println("race done")
 
@@ -119,24 +123,3 @@ func generateSnapshot(url string) ([]byte, error) {
 	})
 	return buf, err
 }
-
-// func fullScreenshot(urlstr string, quality int, res *[]byte) chromedp.Tasks {
-// 	return chromedp.Tasks{
-// 		chromedp.ActionFunc(func(context.Context) error {
-// 			log.Println("hello?")
-// 			return nil
-// 		}),
-// 		chromedp.Navigate(urlstr),
-// 		chromedp.ActionFunc(func(context.Context) error {
-// 			log.Println("navigated to ", urlstr)
-// 			return nil
-// 		}),
-// 		chromedp.WaitEnabled("#status"),
-// 		chromedp.ActionFunc(func(context.Context) error {
-// 			//should handle checking if there's an error msgs here
-// 			log.Println("status ok?")
-// 			return nil
-// 		}),
-// 		chromedp.FullScreenshot(res, quality),
-// 	}
-// }

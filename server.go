@@ -11,19 +11,25 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
+	"github.com/go-rod/rod/lib/launcher"
 	"github.com/redis/go-redis/v9"
 )
 
 type serverCfg func(s *Server) error
 
 type Server struct {
-	logger *slog.Logger
-	Router *chi.Mux
-	rdb    *redis.Client
-	work   chan string
+	logger     *slog.Logger
+	router     *chi.Mux
+	rdb        redis.UniversalClient
+	work       chan string
+	l          *launcher.Launcher
+	listenURL  string
+	previewURL string
+	authKey    string
 
 	// static asset; mandatory to serve from
 	staticFS embed.FS
@@ -41,35 +47,54 @@ type Server struct {
 	// for proxying api requests
 	proxy       *httputil.ReverseProxy
 	proxyTarget *url.URL
+
+	// timeouts
+	generateTimeout time.Duration
+	cacheTTL        time.Duration
 }
 
-func New(fs embed.FS, connOpt redis.Options, opts ...serverCfg) (*Server, error) {
+func New(fs embed.FS, connOpt redis.UniversalOptions, listenURL, launcherURL, previewURL, authKey string) (*Server, error) {
 	s := &Server{
-		staticFS: fs,
-		work:     make(chan string),
+		staticFS:        fs,
+		work:            make(chan string),
+		l:               launcher.MustNewManaged(launcherURL),
+		router:          chi.NewRouter(),
+		listenURL:       listenURL,
+		previewURL:      previewURL,
+		generateTimeout: 90 * time.Second,
+		cacheTTL:        15 * time.Minute,
+		authKey:         authKey,
 	}
-	s.Router = chi.NewRouter()
+	s.rdb = redis.NewUniversalClient(&connOpt)
+	_, err := s.rdb.Ping(context.Background()).Result()
+	if err != nil {
+		return nil, fmt.Errorf("redis ping failed: %w", err)
+	}
+
+	return s, nil
+}
+
+func (s *Server) SetOpts(opts ...serverCfg) error {
 	for _, f := range opts {
 		err := f(s)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
+	return nil
+}
+
+func (s *Server) Start() error {
 	if s.logger == nil {
 		s.logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
 	}
 	err := s.routes()
 	if err != nil {
-		return nil, err
-	}
-	s.rdb = redis.NewClient(&connOpt)
-	_, err = s.rdb.Ping(context.Background()).Result()
-	if err != nil {
-		return nil, fmt.Errorf("redis ping failed: %w", err)
+		return err
 	}
 	go s.listen()
 
-	return s, nil
+	return http.ListenAndServe(s.listenURL, s.router)
 }
 
 func WithLogger(logger *slog.Logger) serverCfg {
@@ -108,32 +133,53 @@ func WithSkipTLSVerify() serverCfg {
 	}
 }
 
-func (s *Server) routes() error {
-	s.Router.Use(middleware.Logger)
-	s.Router.Use(middleware.Recoverer)
-	s.Router.Use(middleware.RequestID)
-
-	if s.useLocalAssets {
-		localAssetsFS := http.FileServer(http.Dir(s.assetsDir))
-		s.Router.Handle(fmt.Sprintf("%v/*", s.assetsPrefix), http.StripPrefix(s.assetsPrefix+"/", localAssetsFS))
+func WithCacheTTL(ttl int) serverCfg {
+	return func(s *Server) error {
+		if ttl <= 0 {
+			return fmt.Errorf("invalid cache ttl <= 0: %v", ttl)
+		}
+		s.cacheTTL = time.Duration(ttl * int(time.Second))
+		return nil
 	}
+}
 
-	if s.useProxy {
-		path := strings.TrimSuffix(s.proxyPrefix, "/")
-		s.Router.Handle(path+"/*", s.handleProxy(path))
+func WithGenerateTimeout(timeout int) serverCfg {
+	return func(s *Server) error {
+		if timeout <= 0 {
+			return fmt.Errorf("invalid timeout <= 0: %v", timeout)
+		}
+		s.generateTimeout = time.Duration(timeout * int(time.Second))
+		return nil
+	}
+}
 
-		s.proxy = httputil.NewSingleHostReverseProxy(s.proxyTarget)
-		if s.skipInsecure {
-			s.proxy.Transport = &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+func (s *Server) routes() error {
+	s.router.Use(middleware.Logger)
+	s.router.Use(middleware.Recoverer)
+	s.router.Use(middleware.RequestID)
+	s.router.With(s.authKeyCheck).Route("/", func(r chi.Router) {
+		if s.useLocalAssets {
+			localAssetsFS := http.FileServer(http.Dir(s.assetsDir))
+			r.Handle(fmt.Sprintf("%v/*", s.assetsPrefix), http.StripPrefix(s.assetsPrefix+"/", localAssetsFS))
+		}
+
+		if s.useProxy {
+			path := strings.TrimSuffix(s.proxyPrefix, "/")
+			r.Handle(path+"/*", s.handleProxy(path))
+
+			s.proxy = httputil.NewSingleHostReverseProxy(s.proxyTarget)
+			if s.skipInsecure {
+				s.proxy.Transport = &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				}
 			}
 		}
-	}
 
-	s.Router.Handle("/generate/db/{id}", s.handleImageRequest("db"))
-	s.Router.Handle("/generate/sh/{id}", s.handleImageRequest("sh"))
+		r.Handle("/generate/db/{id}", s.handleImageRequest("db"))
+		r.Handle("/generate/sh/{id}", s.handleImageRequest("sh"))
 
-	s.Router.NotFound(s.notFoundHandler())
+		r.NotFound(s.notFoundHandler())
+	})
 
 	return nil
 }

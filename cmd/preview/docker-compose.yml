@@ -7,16 +7,26 @@ services:
     ports:
       - 6379:6379
       - 8001:8001
+  rod:
+    image: ghcr.io/go-rod/rod
+    ports:
+      - 7317:7317
   preview:
     container_name: preview
     depends_on:
       - redis
+      - rod
     build:
       context: .
     volumes:
       - /home/srliao/code/assets/assets:/assets
     environment:
+      - PORT=7777
+      - LAUNCHER_URL=ws://rod:7317
+      - AUTH_KEY=SOME_TEST_KEY_NOT_FOR_PROD
       - ASSETS_DATA_PATH=/assets
+      - REDIS_URL=redis:6379
+      - PREVIEW_URL=http://preview:7777
     ports:
-      - 3001:3001
+      - 7777:7777
     restart: unless-stopped
