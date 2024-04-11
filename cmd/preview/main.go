@@ -35,8 +35,9 @@ type config struct {
 	LocalAssets string `env:"ASSETS_PATH"`
 	AssetPrefix string `env:"ASSETS_PREFIX" envDefault:"/api/assets"`
 	// redis options
-	RedisURL []string `env:"REDIS_URL" envDefault:"redis:6379" envSeparator:","`
-	RedisDB  int      `env:"REDIS_DB" envDefault:"0"`
+	RedisURL        []string `env:"REDIS_URL" envDefault:"redis:6379" envSeparator:","`
+	RedisDB         int      `env:"REDIS_DB" envDefault:"0"`
+	RedisMasterName string   `env:"REDIS_MASTER_NAME"`
 	// timeouts
 	GenerateTimeoutInSec int `env:"GENERATE_TIMEOUT_IN_SEC"`
 	CacheTTLInSec        int `env:"CACHE_TTL_IN_SEC"`
@@ -60,8 +61,9 @@ func main() {
 	log.Println("running with config ", cfg)
 
 	server, err := preview.New(content, redis.UniversalOptions{
-		Addrs: cfg.RedisURL,
-		DB:    cfg.RedisDB,
+		Addrs:      cfg.RedisURL,
+		DB:         cfg.RedisDB,
+		MasterName: cfg.RedisMasterName,
 	}, cfg.LauncherURL, cfg.PreviewURL, cfg.AuthKey)
 
 	panicErr(err)
