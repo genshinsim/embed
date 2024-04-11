@@ -11,7 +11,6 @@ services:
       - CF_TUNNEL_TOKEN
     restart: unless-stopped
   redis:
-    # name: redis-stack
     image: redis/redis-stack:latest
     ports:
       - 6379:6379
@@ -27,16 +26,15 @@ services:
       - rod
     build:
       context: .
-    # volumes:
-    #   - /home/srliao/code/assets/assets:/assets
     environment:
       - PORT=7777
       - LAUNCHER_URL=ws://rod:7317
-      - ASSETS_PATH=/assets
+      - ASSETS_PATH=/assets/assets
       - REDIS_URL=redis:6379
       - PREVIEW_URL=http://preview:7777
-      - PROXY_TO=https://gcsim.app
+      - PROXY_TO
       - AUTH_KEY
+      - ASSETS_PAT_TOKEN
     ports:
       - 7777:7777
     restart: unless-stopped
