@@ -18,7 +18,7 @@ import (
 
 func (s *Server) handleProxy(prefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		s.logger.Info("proxying request", "path", prefix, "url", r.URL)
+		s.logger.Info("proxying request", "prefix", prefix, "url", r.URL)
 		r.Host = s.proxyTarget.Host
 		s.proxy.ServeHTTP(w, r)
 	}
@@ -90,7 +90,7 @@ func (s *Server) handleImageRequest(src string) http.HandlerFunc {
 		defer pubsub.Close()
 
 		res := s.rdb.Get(ctx, id)
-		s.logger.Info("got get from redis", "res", res)
+		s.logger.Info("got get from redis", "res_length", len(res.Val()))
 		switch res.Err() {
 		case nil:
 			if val := res.Val(); !strings.HasPrefix(val, "wip") {

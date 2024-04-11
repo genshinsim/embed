@@ -1,0 +1,68 @@
+name: deployment build
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout current repo
+        uses: actions/checkout@v3
+      - name: Checkout main gcsim repo
+        uses: actions/checkout@v2
+        with:
+          repository: genshinsim/gcsim
+          ref: main
+          path: ./gcsim
+      - uses: actions/setup-go@v3
+        with:
+          go-version: "^1.19.3"
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '20.5.1'
+          cache: yarn
+          cache-dependency-path: "**/yarn.lock"
+      - name: Install
+        working-directory: ./gcsim/ui
+        shell: bash
+        run: yarn install --immutable
+      - name: Build embed ui
+        working-directory: ./gcsim/ui
+        shell: bash
+        run: yarn workspace @gcsim/embed build
+      - name: List UI dist
+        working-directory: ./gcsim/ui/packages/embed/dist
+        shell: bash
+        run: |
+          pwd
+          ls -lh
+      - name: move dist into current repo folder
+        run: |
+          pwd
+          mkdir ./cmd/preview/dist
+          mv ./gcsim/ui/packages/embed/dist/* ./cmd/preview/dist
+          ls -lh ./cmd/preview
+      - name: Log in to the Container registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
+        with:
+          images: ghcr.io/${{ github.repository }}
+      - name: Build go executable
+        working-directory: ./cmd/preview
+        run: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build .
+      - name: Build and push Docker image
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: ./cmd/preview/
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

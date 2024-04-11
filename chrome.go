@@ -25,7 +25,7 @@ func (s *Server) listen() {
 	//only one unit of work at a time
 	var queue []string
 	done := make(chan resp)
-	count := 0
+	busy := false
 
 	for {
 		select {
@@ -33,7 +33,7 @@ func (s *Server) listen() {
 			queue = append(queue, w)
 			s.logger.Info("got work", "id", w)
 		case res := <-done:
-			count--
+			busy = false
 			if res.err != nil {
 				status := s.rdb.Set(context.Background(), res.id, res.err.Error(), 5*time.Second)
 				pubstatus := s.rdb.Publish(context.Background(), res.id, res.err.Error())
@@ -45,8 +45,8 @@ func (s *Server) listen() {
 			}
 		}
 		//TODO: more than 1 worker?
-		if count < 1 && len(queue) > 0 {
-			count++
+		if !busy && len(queue) > 0 {
+			busy = true
 			next := queue[0]
 			go s.doWork(next, done)
 			queue = queue[1:]
@@ -66,13 +66,7 @@ func (s *Server) doWork(id string, done chan resp) {
 }
 
 func (s *Server) generateSnapshot(url string) ([]byte, error) {
-	browser := rod.New().Client(s.l.MustClient())
-	err := browser.Connect()
-	if err != nil {
-		return nil, fmt.Errorf("error connecting to browser: %w", err)
-	}
-	log.Println("browser connect ok")
-	page, err := browser.Page(proto.TargetCreateTarget{})
+	page, err := s.browser.Page(proto.TargetCreateTarget{})
 	if err != nil {
 		return nil, fmt.Errorf("error creating page: %w", err)
 	}
@@ -94,13 +88,22 @@ func (s *Server) generateSnapshot(url string) ([]byte, error) {
 	_, err = page.Race().ElementFunc(func(p *rod.Page) (*rod.Element, error) {
 		res, err := page.Evaluate(rod.Eval(`(s, n) => document.querySelectorAll(s).length > n`, "div", 10))
 		if err != nil {
+			s.logger.Info("error querying for all divs", "err", err)
 			return nil, &rod.ElementNotFoundError{}
 		}
-		if res.Value.Bool() {
-			return &rod.Element{}, nil
+		if !res.Value.Bool() {
+			return nil, &rod.ElementNotFoundError{}
+		}
+		res, err = page.Evaluate(rod.Eval(`(s) => document.querySelectorAll(s).length > 0`, "#images_loaded"))
+		if err != nil {
+			s.logger.Info("error querying for #images_loaded", "err", err)
+			return nil, &rod.ElementNotFoundError{}
+		}
+		if !res.Value.Bool() {
+			return nil, &rod.ElementNotFoundError{}
 		}
 
-		return nil, &rod.ElementNotFoundError{}
+		return &rod.Element{}, nil
 	}).Element("#has-error").Handle(func(e *rod.Element) error {
 		str, err := e.Attribute("value")
 		// can't do much aobut this err here other than log it

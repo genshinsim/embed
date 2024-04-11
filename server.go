@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
+	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/redis/go-redis/v9"
 )
@@ -22,12 +23,12 @@ import (
 type serverCfg func(s *Server) error
 
 type Server struct {
+	*chi.Mux
+
 	logger     *slog.Logger
-	router     *chi.Mux
 	rdb        redis.UniversalClient
 	work       chan string
 	l          *launcher.Launcher
-	listenURL  string
 	previewURL string
 	authKey    string
 
@@ -51,15 +52,17 @@ type Server struct {
 	// timeouts
 	generateTimeout time.Duration
 	cacheTTL        time.Duration
+
+	// browser for navigating to pages
+	browser *rod.Browser
 }
 
-func New(fs embed.FS, connOpt redis.UniversalOptions, listenURL, launcherURL, previewURL, authKey string) (*Server, error) {
+func New(fs embed.FS, connOpt redis.UniversalOptions, launcherURL, previewURL, authKey string) (*Server, error) {
 	s := &Server{
 		staticFS:        fs,
 		work:            make(chan string),
 		l:               launcher.MustNewManaged(launcherURL),
-		router:          chi.NewRouter(),
-		listenURL:       listenURL,
+		Mux:             chi.NewRouter(),
 		previewURL:      previewURL,
 		generateTimeout: 90 * time.Second,
 		cacheTTL:        15 * time.Minute,
@@ -69,6 +72,11 @@ func New(fs embed.FS, connOpt redis.UniversalOptions, listenURL, launcherURL, pr
 	_, err := s.rdb.Ping(context.Background()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("redis ping failed: %w", err)
+	}
+	s.browser = rod.New().Client(s.l.MustClient())
+	err = s.browser.Connect()
+	if err != nil {
+		return nil, fmt.Errorf("error connecting to browser: %w", err)
 	}
 
 	return s, nil
@@ -84,7 +92,7 @@ func (s *Server) SetOpts(opts ...serverCfg) error {
 	return nil
 }
 
-func (s *Server) Start() error {
+func (s *Server) Init() error {
 	if s.logger == nil {
 		s.logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
 	}
@@ -94,7 +102,11 @@ func (s *Server) Start() error {
 	}
 	go s.listen()
 
-	return http.ListenAndServe(s.listenURL, s.router)
+	return nil
+}
+
+func (s *Server) Shutdown() error {
+	return s.browser.Close()
 }
 
 func WithLogger(logger *slog.Logger) serverCfg {
@@ -154,10 +166,10 @@ func WithGenerateTimeout(timeout int) serverCfg {
 }
 
 func (s *Server) routes() error {
-	s.router.Use(middleware.Logger)
-	s.router.Use(middleware.Recoverer)
-	s.router.Use(middleware.RequestID)
-	s.router.With(s.authKeyCheck).Route("/", func(r chi.Router) {
+	s.Use(middleware.Logger)
+	s.Use(middleware.Recoverer)
+	s.Use(middleware.RequestID)
+	s.With(s.authKeyCheck).Route("/", func(r chi.Router) {
 		if s.useLocalAssets {
 			localAssetsFS := http.FileServer(http.Dir(s.assetsDir))
 			r.Handle(fmt.Sprintf("%v/*", s.assetsPrefix), http.StripPrefix(s.assetsPrefix+"/", localAssetsFS))

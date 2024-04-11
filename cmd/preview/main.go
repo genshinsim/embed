@@ -1,11 +1,18 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/caarlos0/env/v10"
 	"github.com/genshinsim/preview"
@@ -55,7 +62,7 @@ func main() {
 	server, err := preview.New(content, redis.UniversalOptions{
 		Addrs: cfg.RedisURL,
 		DB:    cfg.RedisDB,
-	}, cfg.Host+":"+cfg.Port, cfg.LauncherURL, cfg.PreviewURL, cfg.AuthKey)
+	}, cfg.LauncherURL, cfg.PreviewURL, cfg.AuthKey)
 
 	panicErr(err)
 
@@ -77,8 +84,41 @@ func main() {
 		panicErr(server.SetOpts(preview.WithCacheTTL(cfg.CacheTTLInSec)))
 	}
 
-	log.Println("starting img generation listener")
-	log.Fatal(server.Start())
+	err = server.Init()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	httpServer := &http.Server{
+		Addr:    cfg.Host + ":" + cfg.Port,
+		Handler: server,
+	}
+
+	go func() {
+		if err := httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+		log.Println("Stopped serving new connections.")
+	}()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
+
+	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownRelease()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Println("HTTP graceful shutdown encountered error, forcing shutdown")
+		//force shut down
+		err := httpServer.Close()
+		log.Println("Force shut down completed with error: ", err)
+		log.Println("Shutting down browsers: ", server.Shutdown())
+		//shut down browsers
+		log.Fatalf("HTTP shutdown error: %v", err)
+	}
+	log.Println("Graceful shutdown complete.")
+	log.Println("Shutting down browsers: ", server.Shutdown())
 }
 
 func panicErr(err error) {
